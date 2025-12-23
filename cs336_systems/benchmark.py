@@ -64,8 +64,10 @@ def get_args():
     parser.add_argument("--batch_size", type=int, default=16, help="Batch size")
     parser.add_argument("--warmup_steps", "-w", type=int, default=5, help="Number of warm-up steps")
     parser.add_argument("--steps", "-n", type=int, default=10, help="Number of steps to time")
-    parser.add_argument("--mode", choices=["forward", "backward"], default="forward", help="Benchmarking mode: forward only or forward+backward")
+    parser.add_argument("--mode", choices=["forward", "backward", "training"], default="forward", help="Benchmarking mode: forward only, forward+backward, or full training step (fwd+bwd+opt)")
     parser.add_argument("--mixed_precision", choices=["no", "bf16"], default="no", help="Use mixed precision (bf16) or not")
+    parser.add_argument("--enable_memory_profiling", action="store_true", help="Enable memory profiling")
+    parser.add_argument("--memory_snapshot_file", type=str, default="profiling_result/memory_snapshot.pickle", help="Output file for memory snapshot")
     
     args = parser.parse_args()
     
@@ -107,6 +109,7 @@ def run_benchmark():
     y = torch.randint(0, args.vocab_size, (args.batch_size, args.context_length), device=device)
     
     criterion = nn.CrossEntropyLoss()
+    optimizer = torch.optim.AdamW(model.parameters())
     
     def sync():
         if torch.cuda.is_available():
@@ -150,15 +153,40 @@ def run_benchmark():
             if measure:
                 backward_times.append(t3 - t2)
 
+        elif args.mode == "training":
+            with mp_context:
+                loss = criterion(logits.view(-1, args.vocab_size), y.view(-1))
+            
+            # Backward
+            loss.backward()
+            
+            # Optimizer step
+            optimizer.step()
+            optimizer.zero_grad(set_to_none=True)
+            sync()
+            t3 = timeit.default_timer()
+            
+            if measure:
+                backward_times.append(t3 - t1) # For training, track time after forward pass (Backward + Opt)
+
     # 3. Warm-up
     print(f"Running {args.warmup_steps} warm-up steps...")
     for _ in range(args.warmup_steps):
         step_fn(measure=False)
+
+    if args.enable_memory_profiling:
+        print("Starting memory recording...")
+        torch.cuda.memory._record_memory_history(max_entries=1000000)
         
     # 4. Timing
     print(f"Running {args.steps} steps for timing...")
     for _ in range(args.steps):
         step_fn(measure=True)
+
+    if args.enable_memory_profiling:
+        print(f"Saving memory snapshot to {args.memory_snapshot_file}...")
+        torch.cuda.memory._dump_snapshot(args.memory_snapshot_file)
+        torch.cuda.memory._record_memory_history(enabled=None)
     
     # 5. Report results
     print(f"\nResults (over {args.steps} steps):")
@@ -172,6 +200,13 @@ def run_benchmark():
         b_stdev = statistics.stdev(backward_times) if len(backward_times) > 1 else 0.0
         print(f"Backward pass: {b_mean:.4f} s ± {b_stdev:.4f} s")
         print(f"Total step:    {(f_mean + b_mean):.4f} s")
+    
+    if args.mode == "training":
+        # In training mode, backward_times measures the duration of (Backward Pass + Optimizer Step)
+        b_mean = statistics.mean(backward_times)
+        b_stdev = statistics.stdev(backward_times) if len(backward_times) > 1 else 0.0
+        print(f"Backward + Optimizer: {b_mean:.4f} s ± {b_stdev:.4f} s")
+        print(f"Total Step Time:      {(f_mean + b_mean):.4f} s")
 
 if __name__ == "__main__":
     run_benchmark()

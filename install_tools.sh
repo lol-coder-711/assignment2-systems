@@ -4,6 +4,9 @@ set -e
 echo "Installing uv..."
 pip install uv
 
+echo "Installing dependencies..."
+uv sync
+
 echo "Installing nsys..."
 apt update
 apt install -y --no-install-recommends gnupg
