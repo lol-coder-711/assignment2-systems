@@ -1,0 +1,127 @@
+----------------------------------------------------------------
+Running Config: small | Precision: no
+----------------------------------------------------------------
+Using device: cuda
+Configuration: small
+Model params: d_model=768, layers=12, heads=12, d_ff=3072
+Initializing model... Done.
+Generating data...
+Running 2 warm-up steps...
+Running 5 steps for timing...
+
+Results (over 5 steps):
+Forward pass:  0.0378 s ± 0.0045 s
+Backward pass: 0.0335 s ± 0.0015 s
+Total step:    0.0714 s
+
+----------------------------------------------------------------
+Running Config: small | Precision: bf16
+----------------------------------------------------------------
+Using device: cuda
+Configuration: small
+Model params: d_model=768, layers=12, heads=12, d_ff=3072
+Initializing model... Done.
+Generating data...
+Running 2 warm-up steps...
+Running 5 steps for timing...
+
+Results (over 5 steps):
+Forward pass:  0.0317 s ± 0.0001 s
+Backward pass: 0.0334 s ± 0.0004 s
+Total step:    0.0651 s
+
+----------------------------------------------------------------
+Running Config: medium | Precision: no
+----------------------------------------------------------------
+Using device: cuda
+Configuration: medium
+Model params: d_model=1024, layers=24, heads=16, d_ff=4096
+Initializing model... Done.
+Generating data...
+Running 2 warm-up steps...
+Running 5 steps for timing...
+
+Results (over 5 steps):
+Forward pass:  0.0490 s ± 0.0003 s
+Backward pass: 0.0829 s ± 0.0003 s
+Total step:    0.1319 s
+
+----------------------------------------------------------------
+Running Config: medium | Precision: bf16
+----------------------------------------------------------------
+Using device: cuda
+Configuration: medium
+Model params: d_model=1024, layers=24, heads=16, d_ff=4096
+Initializing model... Done.
+Generating data...
+Running 2 warm-up steps...
+Running 5 steps for timing...
+
+Results (over 5 steps):
+Forward pass:  0.0527 s ± 0.0009 s
+Backward pass: 0.0661 s ± 0.0016 s
+Total step:    0.1189 s
+
+----------------------------------------------------------------
+Running Config: large | Precision: no
+----------------------------------------------------------------
+Using device: cuda
+Configuration: large
+Model params: d_model=1280, layers=36, heads=20, d_ff=5120
+Initializing model... Done.
+Generating data...
+Running 2 warm-up steps...
+Running 5 steps for timing...
+
+Results (over 5 steps):
+Forward pass:  0.0936 s ± 0.0003 s
+Backward pass: 0.2166 s ± 0.0004 s
+Total step:    0.3101 s
+
+----------------------------------------------------------------
+Running Config: large | Precision: bf16
+----------------------------------------------------------------
+Using device: cuda
+Configuration: large
+Model params: d_model=1280, layers=36, heads=20, d_ff=5120
+Initializing model... Done.
+Generating data...
+Running 2 warm-up steps...
+Running 5 steps for timing...
+
+Results (over 5 steps):
+Forward pass:  0.0782 s ± 0.0004 s
+Backward pass: 0.0990 s ± 0.0003 s
+Total step:    0.1772 s
+
+----------------------------------------------------------------
+Running Config: xl | Precision: no
+----------------------------------------------------------------
+Using device: cuda
+Configuration: xl
+Model params: d_model=1600, layers=48, heads=25, d_ff=6400
+Initializing model... Done.
+Generating data...
+Running 2 warm-up steps...
+Running 5 steps for timing...
+
+Results (over 5 steps):
+Forward pass:  0.1914 s ± 0.0002 s
+Backward pass: 0.4068 s ± 0.0004 s
+Total step:    0.5982 s
+
+----------------------------------------------------------------
+Running Config: xl | Precision: bf16
+----------------------------------------------------------------
+Using device: cuda
+Configuration: xl
+Model params: d_model=1600, layers=48, heads=25, d_ff=6400
+Initializing model... 
+----------------------------------------------------------------
+Running Config: 2.7B | Precision: no
+----------------------------------------------------------------
+
+----------------------------------------------------------------
+Running Config: 2.7B | Precision: bf16
+----------------------------------------------------------------
+
