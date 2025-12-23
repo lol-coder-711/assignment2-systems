@@ -68,6 +68,7 @@ def get_args():
     parser.add_argument("--mixed_precision", choices=["no", "bf16"], default="no", help="Use mixed precision (bf16) or not")
     parser.add_argument("--enable_memory_profiling", action="store_true", help="Enable memory profiling")
     parser.add_argument("--memory_snapshot_file", type=str, default="profiling_result/memory_snapshot.pickle", help="Output file for memory snapshot")
+    parser.add_argument("--compile", action="store_true", help="Compile the model with torch.compile")
     
     args = parser.parse_args()
     
@@ -89,7 +90,8 @@ def run_benchmark():
     print(f"Using device: {device}")
     print(f"Configuration: {args.config if args.config else 'Custom'}")
     print(f"Model params: d_model={args.d_model}, layers={args.num_layers}, heads={args.num_heads}, d_ff={args.d_ff}")
-    
+    print(f"Compilation: {'Enabled' if args.compile else 'Disabled'}")
+
     # 1. Initialize model
     print("Initializing model...", end=" ", flush=True)
     model = BasicsTransformerLM(
@@ -101,6 +103,11 @@ def run_benchmark():
         d_ff=args.d_ff,
         rope_theta=args.rope_theta,
     ).to(device)
+    
+    if args.compile:
+        print("Compiling model (this may take a while)...")
+        model = torch.compile(model)
+        
     print("Done.")
     
     # 2. Generate random batch of data

@@ -32,18 +32,15 @@ def benchmark():
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Benchmarking on {device}")
     
-    print(f"{'d_head':<8} | {'seq_len':<8} | {'Fwd (ms)':<10} | {'Bwd (ms)':<10} | {'Mem (GB)':<10} | {'Status'}")
-    print("-" * 70)
+    compiled_attn = torch.compile(scaled_dot_product_attention)
+    
+    print(f"{'d_head':<8} | {'seq_len':<8} | {'Van Fwd':<10} | {'Van Bwd':<10} | {'Cmp Fwd':<10} | {'Cmp Bwd':<10} | {'Mem (GB)':<10} | {'Status'}")
+    print("-" * 100)
 
     for d_head in D_HEADS:
         for seq_len in SEQ_LENS:
             try:
                 # Setup
-                # Shape: (Batch, Seq, D_Head)
-                # Note: "don't use multihead attention (i.e. remove the head dimension)" 
-                # effectively means treating input as (Batch, Seq, Feature) where Feature = d_head.
-                
-                # Reset memory
                 torch.cuda.empty_cache()
                 torch.cuda.reset_peak_memory_stats()
                 
@@ -51,6 +48,7 @@ def benchmark():
                 K = torch.randn(BATCH_SIZE, seq_len, d_head, device=device, requires_grad=True)
                 V = torch.randn(BATCH_SIZE, seq_len, d_head, device=device, requires_grad=True)
                 
+                # --- VANILLA BENCHMARK ---
                 # Warmup
                 for _ in range(5):
                     out = scaled_dot_product_attention(Q, K, V)
@@ -65,53 +63,73 @@ def benchmark():
                     out = scaled_dot_product_attention(Q, K, V)
                 torch.cuda.synchronize()
                 t1 = timeit.default_timer()
-                fwd_ms = (t1 - t0) * 1000 / 100 
+                van_fwd_ms = (t1 - t0) * 1000 / 100 
                 
-                # Measure Memory before Backward
-                # We need to do one forward pass and KEEP the graph alive
-                # to measure activation memory
+                # Measure Memory before Backward (Vanilla)
                 torch.cuda.reset_peak_memory_stats()
                 out = scaled_dot_product_attention(Q, K, V)
                 mem_bytes = torch.cuda.max_memory_allocated()
                 loss = out.sum()
                 
                 # Measure Backward
-                t2 = timeit.default_timer()
-                for _ in range(100):
-                    # We need to re-run forward inside loop to have a graph to backprop through?
-                    # Or usually benchmark usually does: forward + backward in loop?
-                    # The prompt says "time 100 backward passes".
-                    # Typically this implies: Fwd, Bwd, Fwd, Bwd... 
-                    # If we just call loss.backward() 100 times on same graph, it's error (buffers freed).
-                    # So we must loop full step.
-                    
-                    # Wait, prompt says: "Time 100 forward passes... Time 100 backward passes".
-                    # This is slightly ambiguous. You usually can't time JUST backward 100 times in isolation efficiently without re-forwarding.
-                    # UNLESS use retain_graph=True? But that accumulates memory.
-                    # Standard practice: Time (Forward + Backward) - Time(Forward).
-                    # Or just: Run Forward, Time Backward specific call.
-                    
-                    # I will do: Loop 100 times: (Forward, Time Backward Start, Backward, Time Backward End, Zero Grad)
-                    pass
-                
-                # Correct approach for measuring Backward Time:
                 bwd_times = []
                 for _ in range(100):
-                    # Re-create graph
                     out_loop = scaled_dot_product_attention(Q, K, V)
                     loss_loop = out_loop.sum()
-                    
                     torch.cuda.synchronize()
                     t_b_start = timeit.default_timer()
                     loss_loop.backward()
                     torch.cuda.synchronize()
                     t_b_end = timeit.default_timer()
                     bwd_times.append(t_b_end - t_b_start)
-                    
-                    # Zero grads
                     Q.grad = None; K.grad = None; V.grad = None
+                van_bwd_ms = (sum(bwd_times) / len(bwd_times)) * 1000
+                
+                # Cleanup Vanilla variables before Compiled run to save memory
+                del out, loss, out_loop, loss_loop
+                Q.grad = None; K.grad = None; V.grad = None
+                torch.cuda.empty_cache()
+                import gc; gc.collect()
 
-                bwd_ms = (sum(bwd_times) / len(bwd_times)) * 1000
+                # --- COMPILED BENCHMARK ---
+                # Re-create fresh graph inputs just in case (though resetting grads is enough)
+                
+                # Warmup (Important: This triggers compilation!)
+                for _ in range(5):
+                    out = compiled_attn(Q, K, V)
+                    loss = out.sum()
+                    loss.backward()
+                    Q.grad = None; K.grad = None; V.grad = None
+                torch.cuda.synchronize()
+                
+                # Measure Compiled Forward
+                t0 = timeit.default_timer()
+                for _ in range(100):
+                    out = compiled_attn(Q, K, V)
+                torch.cuda.synchronize()
+                t1 = timeit.default_timer()
+                cmp_fwd_ms = (t1 - t0) * 1000 / 100
+                
+                # Measure Compiled Backward
+                # Note: compiled objects usually manage their own backward graph compilation
+                bwd_times_cmp = []
+                for _ in range(100):
+                    out_loop = compiled_attn(Q, K, V)
+                    loss_loop = out_loop.sum()
+                    torch.cuda.synchronize()
+                    t_b_start = timeit.default_timer()
+                    loss_loop.backward()
+                    torch.cuda.synchronize()
+                    t_b_end = timeit.default_timer()
+                    bwd_times_cmp.append(t_b_end - t_b_start)
+                    Q.grad = None; K.grad = None; V.grad = None
+                cmp_bwd_ms = (sum(bwd_times_cmp) / len(bwd_times_cmp)) * 1000
+
+                # Check if compiled version memory usage is significantly different? 
+                # Prompt doesn't mandate tracking second memory stat, but we can stick to vanilla memory for the table column
+                # or we could update it. For now, using Vanilla memory as reference for OOM check.
+
+                print(f"{d_head:<8} | {seq_len:<8} | {van_fwd_ms:<10.4f} | {van_bwd_ms:<10.4f} | {cmp_fwd_ms:<10.4f} | {cmp_bwd_ms:<10.4f} | {mem_bytes/1e9:<10.4f} | OK")
                 
                 # Cleanup
                 if 'out' in locals(): del out
@@ -122,10 +140,8 @@ def benchmark():
                 torch.cuda.empty_cache()
                 import gc; gc.collect()
 
-                print(f"{d_head:<8} | {seq_len:<8} | {fwd_ms:<10.4f} | {bwd_ms:<10.4f} | {mem_bytes/1e9:<10.4f} | OK")
-                
             except torch.cuda.OutOfMemoryError:
-                print(f"{d_head:<8} | {seq_len:<8} | {'N/A':<10} | {'N/A':<10} | {'OOM':<10} | OOM")
+                print(f"{d_head:<8} | {seq_len:<8} | {'N/A':<10} | {'N/A':<10} | {'N/A':<10} | {'N/A':<10} | {'OOM':<10} | OOM")
                 # Attempt to cleanup
                 if 'Q' in locals(): del Q
                 if 'K' in locals(): del K
