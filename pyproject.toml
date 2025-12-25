@@ -31,7 +31,7 @@ module-root = ""
 [tool.uv]
 package = true
 python-preference = "managed"
-environments = ["sys_platform == 'darwin'"]
+environments = ["sys_platform == 'darwin'", "sys_platform == 'linux'"]
 
 [[tool.uv.index]]
 url = "https://pypi.org/simple"
