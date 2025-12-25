@@ -77,8 +77,12 @@ def flash_fwd_kernel(
 
         S_ij = tl.dot(Q_i, tl.trans(K_j)) * scale
 
-        # if IS_CAUSAL:
-        #     tl.fill(S_ij, float("-inf"), tl.arange(0, Q_TILE_SIZE) >= tl.arange(0, K_TILE_SIZE))
+        if IS_CAUSAL:
+            # need to have global index!!
+            index_q = query_tile_index * Q_TILE_SIZE + tl.arange(0, Q_TILE_SIZE)
+            index_k = j * K_TILE_SIZE + tl.arange(0, K_TILE_SIZE)
+            mask = index_q[:, None] >= index_k[None, :]
+            S_ij = tl.where(mask, S_ij, float("-inf"))
             
         m_ij = tl.maximum(m_ij_prev, tl.max(S_ij, axis=1))
 
