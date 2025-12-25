@@ -52,21 +52,6 @@ class FlashAttention(torch.autograd.Function):
         """
         In this function, we implement the backward pass of FlashAttention-2.
         """
-        Q = ctx.Q
-        K = ctx.K
-        V = ctx.V
-        O = ctx.O
-        L = ctx.L
-
-        D = torch.sum(O * dO, dim=-1)
-        d = Q.shape[-1]
-        S = einsum(Q, K, '... q d, ... k d -> ... q k') / d**0.5
-        P = torch.exp(S - L.unsqueeze(-1))
-        dV = einsum(P, dO, '... q k, ... q d -> ... k d')
-        dP = einsum(dO, V, '... q d, ... k d -> ... q k')
-        dS = P * (dP - D.unsqueeze(-1))
-        dQ = einsum(dS, K, '... q k, ... k d -> ... q d') / d**0.5
-        dK = einsum(dS, Q, '... q k, ... q d -> ... k d') / d**0.5
-        return dQ, dK, dV
+        raise NotImplementedError
 
 

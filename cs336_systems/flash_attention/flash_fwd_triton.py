@@ -146,10 +146,34 @@ class FlashAttentionTriton(torch.autograd.Function):
             K_TILE_SIZE=K_TILE_SIZE,
             IS_CAUSAL=is_causal,
         )
-        ctx.save_for_backward(O, L)
+        ctx.save_for_backward(O, L, Q, K, V)
         ctx.is_causal = is_causal
         return O
 
     @staticmethod
-    def backward(ctx, grad_out):
-        raise NotImplementedError
+    def backward(ctx, dO):
+        O, L, Q, K, V = ctx.saved_tensors
+        
+        # Recompute P and gradients
+        # Use torch.compile on a function to speed this up as requested
+        # For simplicity in this assignment, we implement the logic directly
+        # but note that in a real scenario this block would be compiled.
+        def backward_math(Q, K, V, O, L, dO):
+            D = torch.sum(O * dO, dim=-1)
+            d = Q.shape[-1]
+            S = einsum(Q, K, '... q d, ... k d -> ... q k') / d**0.5
+            # Need to also apply mask to S during backward
+            if ctx.is_causal:
+                 mask = torch.arange(Q.shape[-2], device=Q.device)[None, :, None] >= torch.arange(K.shape[-2], device=K.device)[None, None, :]
+                 S = torch.where(mask, S, float("-inf"))
+
+            P = torch.exp(S - L.unsqueeze(-1))
+            dV = einsum(P, dO, '... q k, ... q d -> ... k d')
+            dP = einsum(dO, V, '... q d, ... k d -> ... q k')
+            dS = P * (dP - D.unsqueeze(-1))
+            dQ = einsum(dS, K, '... q k, ... k d -> ... q d') / d**0.5
+            dK = einsum(dS, Q, '... q k, ... q d -> ... k d') / d**0.5
+            return dQ, dK, dV
+
+        compiled_backward = torch.compile(backward_math)
+        return compiled_backward(Q, K, V, O, L, dO)
