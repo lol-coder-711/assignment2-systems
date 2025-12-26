@@ -8,6 +8,7 @@ import torch.optim as optim
 import logging
 
 from cs336_systems.dist_training.ddp_naive import naive_ddp_all_reduce
+from cs336_systems.dist_training.ddp_individual_parameters import DDP
 
 try:
     from cs336_basics.model import BasicsTransformerLM
@@ -55,14 +56,15 @@ class Timer:
 
 
 
-def run_benchmark(rank, world_size, flatten=False, results_queue=None):
+def run_benchmark(rank, world_size, flatten=False, overlap=False, results_queue=None):
     """
     Run benchmark for DDP training.
     
     Args:
         rank: Process rank
         world_size: Number of processes
-        flatten: Whether to use flattened all-reduce
+        flatten: Whether to use flattened all-reduce (ignored if overlap=True)
+        overlap: Whether to use DDP with async gradient hooks for overlap
         results_queue: Multiprocessing queue to store results
     """
     # 1. Setup Environment
@@ -86,7 +88,12 @@ def run_benchmark(rank, world_size, flatten=False, results_queue=None):
     dist.init_process_group(backend, rank=rank, world_size=world_size)
     
     if rank == 0:
-        method_name = "Flattened" if flatten else "Naive"
+        if overlap:
+            method_name = "Overlap"
+        elif flatten:
+            method_name = "Flattened"
+        else:
+            method_name = "Naive"
         logger.info(f"Running on {device} with backend {backend}, Method: {method_name}")
 
     # 2. Model Configuration
@@ -118,8 +125,13 @@ def run_benchmark(rank, world_size, flatten=False, results_queue=None):
 
     # Initialize Model
     # Note: BasicsTransformerLM expects explicit args, unpacking config
+    # For overlap mode, we'll wrap with DDP after initialization
     try:
         model = BasicsTransformerLM(**config).to(device)
+        
+        # Wrap with DDP if overlap mode
+        if overlap:
+            model = DDP(model)
     except Exception as e:
         logger.error(f"Failed to init model: {e}")
         return
@@ -137,8 +149,8 @@ def run_benchmark(rank, world_size, flatten=False, results_queue=None):
     labels = torch.randint(0, vocab_size, (batch_size, seq_len)).to(device)
 
     # 4. Benchmarking Loop
-    num_warmup = 1
-    num_steps = 3
+    num_warmup = 5
+    num_steps = 10
     
     step_timer = Timer(device)
     comm_timer = Timer(device)
@@ -159,17 +171,42 @@ def run_benchmark(rank, world_size, flatten=False, results_queue=None):
         optimizer.zero_grad()
         logits = model(input_ids)
         loss = criterion(logits.view(-1, vocab_size), labels.view(-1))
-        loss.backward()
-
-        # Communication (Naive All-Reduce)
-        if not is_warmup:
-            comm_timer.start()
-            
-        step_bytes = naive_ddp_all_reduce(model, world_size, return_stats=True, flatten=flatten)
         
+        # Time backward separately
         if not is_warmup:
-            step_comm_ms = comm_timer.stop()
-            total_comm_time += step_comm_ms
+            backward_timer = Timer(device)
+            backward_timer.start()
+        loss.backward()
+        if not is_warmup:
+            backward_ms = backward_timer.stop()
+            if rank == 0 and overlap:
+                logger.info(f"  Backward: {backward_ms:.2f}ms")
+
+        # Communication
+        if overlap:
+            # Overlap mode: hooks already triggered async all-reduce during backward
+            if not is_warmup:
+                comm_timer.start()
+            model.finish_gradient_synchronization()
+            if not is_warmup:
+                step_comm_ms = comm_timer.stop()
+                total_comm_time += step_comm_ms
+            # For overlap, we can't easily measure bytes, use approximate
+            if step == num_warmup:
+                # Calculate bytes once (all params)
+                step_bytes = sum(p.grad.numel() * p.grad.element_size() 
+                                for p in model.module.parameters() 
+                                if p.requires_grad and p.grad is not None)
+        else:
+            # Naive/Flattened: blocking all-reduce
+            if not is_warmup:
+                comm_timer.start()
+                
+            step_bytes = naive_ddp_all_reduce(model, world_size, return_stats=True, flatten=flatten)
+            
+            if not is_warmup:
+                step_comm_ms = comm_timer.stop()
+                total_comm_time += step_comm_ms
 
         optimizer.step()
 
@@ -191,6 +228,7 @@ def run_benchmark(rank, world_size, flatten=False, results_queue=None):
         result = {
             'world_size': world_size,
             'flatten': flatten,
+            'overlap': overlap,
             'device': str(device),
             'avg_step_time': avg_step_time,
             'avg_comm_time': avg_comm_time,
@@ -208,51 +246,87 @@ def print_results_table(results):
     Print benchmark results in a nicely formatted table.
     """
     print("\n" + "="*100)
-    print("DDP BENCHMARK RESULTS: Naive vs Flattened All-Reduce")
+    print("DDP BENCHMARK RESULTS: Naive vs Flattened vs Overlap")
     print("="*100)
     
     # Header
     print(f"{'Method':<12} {'World Size':<12} {'Avg Step (ms)':<16} {'Avg Comm (ms)':<16} {'Data (MB)':<12} {'Comm %':<10}")
     print("-" * 100)
     
-    # Sort results by world_size then flatten
-    results = sorted(results, key=lambda x: (x['world_size'], x['flatten']))
+    # Sort results by world_size, then by method (naive, flattened, overlap)
+    def method_key(r):
+        if r.get('overlap'):
+            return 2  # Overlap
+        elif r.get('flatten'):
+            return 1  # Flattened
+        else:
+            return 0  # Naive
+    
+    results = sorted(results, key=lambda x: (x['world_size'], method_key(x)))
     
     # Print rows
     for r in results:
-        method = "Flattened" if r['flatten'] else "Naive"
+        if r.get('overlap'):
+            method = "Overlap"
+        elif r.get('flatten'):
+            method = "Flattened"
+        else:
+            method = "Naive"
         print(f"{method:<12} {r['world_size']:<12} {r['avg_step_time']:<16.2f} {r['avg_comm_time']:<16.2f} "
               f"{r['avg_step_bytes']/1e6:<12.2f} {r['comm_ratio']:<10.2f}")
     
     print("="*100 + "\n")
     
     # Print speedup analysis
-    print("SPEEDUP ANALYSIS (Flattened vs Naive):")
-    print("-" * 60)
+    print("SPEEDUP ANALYSIS (vs Naive baseline):")
+    print("-" * 80)
     world_sizes = sorted(set(r['world_size'] for r in results))
     for ws in world_sizes:
-        naive = next((r for r in results if r['world_size'] == ws and not r['flatten']), None)
-        flattened = next((r for r in results if r['world_size'] == ws and r['flatten']), None)
+        naive = next((r for r in results if r['world_size'] == ws and not r.get('flatten') and not r.get('overlap')), None)
+        flattened = next((r for r in results if r['world_size'] == ws and r.get('flatten')), None)
+        overlap = next((r for r in results if r['world_size'] == ws and r.get('overlap')), None)
         
-        if naive and flattened:
-            step_speedup = naive['avg_step_time'] / flattened['avg_step_time']
-            comm_speedup = naive['avg_comm_time'] / flattened['avg_comm_time']
-            print(f"World Size {ws}: Step Speedup: {step_speedup:.2f}x, Comm Speedup: {comm_speedup:.2f}x")
-    print("-" * 60 + "\n")
+        if naive:
+            print(f"\nWorld Size {ws}:")
+            if flattened:
+                step_speedup = naive['avg_step_time'] / flattened['avg_step_time']
+                comm_speedup = naive['avg_comm_time'] / flattened['avg_comm_time']
+                print(f"  Flattened - Step: {step_speedup:.2f}x, Comm: {comm_speedup:.2f}x")
+            if overlap:
+                step_speedup = naive['avg_step_time'] / overlap['avg_step_time']
+                comm_speedup = naive['avg_comm_time'] / overlap['avg_comm_time']
+                print(f"  Overlap   - Step: {step_speedup:.2f}x, Comm: {comm_speedup:.2f}x")
+    print("-" * 80 + "\n")
 
 
 if __name__ == "__main__":
     os.environ['PYTORCH_ENABLE_MPS_FALLBACK'] = '1'
     
-    # Test configurations: cartesian product of methods and world sizes
-    world_sizes = [2, 4, 8]
-    flatten_options = [False, True]  # Naive, Flattened
+    # Test configurations
+    world_sizes = list(range(2, 11))  # 2, 3, 4, 5, 6, 7, 8, 9, 10
+    # Three methods: Naive (flatten=False, overlap=False), 
+    #                Flattened (flatten=True, overlap=False),
+    #                Overlap (flatten=False, overlap=True)
+    test_configs = [
+        {'flatten': False, 'overlap': False},  # Naive
+        {'flatten': True, 'overlap': False},   # Flattened  
+        {'flatten': False, 'overlap': True},   # Overlap
+    ]
     
     all_results = []
     
     for world_size in world_sizes:
-        for flatten in flatten_options:
-            method_name = "Flattened" if flatten else "Naive"
+        for config in test_configs:
+            flatten = config['flatten']
+            overlap = config['overlap']
+            
+            if overlap:
+                method_name = "Overlap"
+            elif flatten:
+                method_name = "Flattened"
+            else:
+                method_name = "Naive"
+                
             print(f"\n{'='*60}")
             print(f"Running: Method={method_name}, World Size={world_size}")
             print(f"{'='*60}\n")
@@ -263,7 +337,7 @@ if __name__ == "__main__":
             # Run benchmark
             mp.spawn(
                 run_benchmark,
-                args=(world_size, flatten, results_queue),
+                args=(world_size, flatten, overlap, results_queue),
                 nprocs=world_size,
                 join=True
             )
