@@ -61,7 +61,7 @@ def benchmark_worker(rank, world_size, backend, device, data_sizes_mb, num_iters
             
             # Create tensor on the appropriate device
             if device == 'cuda':
-                tensor = torch.randn(num_elements, device=device_id)
+                tensor = torch.randn(num_elements, device=f"cuda:{device_id}")
             else:
                 tensor = torch.randn(num_elements)  # CPU tensor
             
