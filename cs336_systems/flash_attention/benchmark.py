@@ -78,7 +78,8 @@ def run_benchmark():
                     # Forward Benchmark
                     try:
                         fwd_ms = triton.testing.do_bench(lambda: func(Q, K, V, IS_CAUSAL))
-                    except Exception:
+                    except Exception as e:
+                        print(f"Benchmark failed for {name} ({dtype}): {e}")
                         fwd_ms = float('nan')
                     
                     row_data[f"{name}_fwd"] = fwd_ms
@@ -99,14 +100,22 @@ def run_benchmark():
 
                 results.append(row_data)
                 
+                # Cleanup to prevent OOM
+                del Q, K, V, dO
+                if 'out' in locals(): del out
+                torch.cuda.empty_cache()
+                
                 # Print progress row
                 print(f"{seq_len:<8} {dim:<4} {row_data['dtype']:<8} | "
                       f"{row_data['Torch(Eager)_fwd']:<12.4f} {row_data['Torch(Compile)_fwd']:<14.4f} {row_data['FlashAttn_fwd']:<12.4f}")
 
     # Save detailed CSV
+    import datetime
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"flash_attention_benchmark_results_{timestamp}.csv"
     df = pd.DataFrame(results)
-    df.to_csv("flash_attention_benchmark_results.csv", index=False)
-    print("\nBenchmark complete. Results saved to flash_attention_benchmark_results.csv")
+    df.to_csv(filename, index=False)
+    print(f"\nBenchmark complete. Results saved to {filename}")
     print(df)
 
 if __name__ == "__main__":
