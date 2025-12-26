@@ -101,7 +101,7 @@ def flash_fwd_kernel(
 
     O_i = O_ij_prev / l_ij_prev[:, None] # divide each row by l_ij_prev
     L_i = m_ij_prev + tl.log(l_ij_prev)
-    tl.store(O_block_ptr, O_i)
+    tl.store(O_block_ptr, O_i.to(O_ptr.dtype.element_ty))
     tl.store(L_block_ptr, L_i)
 
 class FlashAttentionTriton(torch.autograd.Function):
