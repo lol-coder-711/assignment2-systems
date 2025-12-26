@@ -3,6 +3,7 @@ import torch
 import triton
 import triton.language as tl
 from jaxtyping import Float
+from einops import einsum
 
 @triton.jit
 def flash_fwd_kernel(
@@ -176,4 +177,4 @@ class FlashAttentionTriton(torch.autograd.Function):
             return dQ, dK, dV
 
         compiled_backward = torch.compile(backward_math)
-        return compiled_backward(Q, K, V, O, L, dO)
+        return compiled_backward(Q, K, V, O, L, dO) + (None,)
