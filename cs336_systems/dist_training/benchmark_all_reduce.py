@@ -17,21 +17,20 @@ def setup(rank, world_size, backend, device='cpu', device_id=None):
     if backend == "gloo" and platform.system() == "Darwin":
         os.environ["GLOO_SOCKET_IFNAME"] = "lo0"
 
-    # For NCCL, we need to tell init_process_group which device to use
-    # This prevents the "devices unknown" warning and potential hangs
+    # For NCCL, configure P2P level and set the CUDA device
     if backend == "nccl" and device == "cuda" and device_id is not None:
-        # Create a device object to pass to init_process_group
-        torch_device = torch.device(f"cuda:{device_id}")
-        dist.init_process_group(
-            backend,
-            rank=rank,
-            world_size=world_size,
-            timeout=timedelta(minutes=5),
-            device_id=torch_device  # This tells NCCL which GPU to use
-        )
-    else:
-        # Initialize the process group (for gloo or when device_id not provided)
-        dist.init_process_group(backend, rank=rank, world_size=world_size, timeout=timedelta(minutes=5))
+        # Use NCCL_P2P_LEVEL=LOC to disable PCIe (PIX) P2P but keep NVLink P2P.
+        # PCIe P2P hangs in this Runpod container environment (likely due to
+        # container restrictions on PCIe BAR access or missing GPU-Direct permissions).
+        # LOC level allows:
+        #   - NVLink P2P (if available, high performance)
+        #   - Falls back to socket-based communication for PCIe-only setups
+        # This is more flexible than NCCL_P2P_DISABLE=1 which disables all P2P.
+        os.environ["NCCL_P2P_LEVEL"] = "LOC"
+        torch.cuda.set_device(device_id)
+    
+    # Initialize the process group (works for both gloo and nccl)
+    dist.init_process_group(backend, rank=rank, world_size=world_size, timeout=timedelta(minutes=5))
 
 def cleanup():
     dist.destroy_process_group()
