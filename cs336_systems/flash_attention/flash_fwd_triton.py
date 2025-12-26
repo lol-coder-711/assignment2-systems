@@ -113,8 +113,35 @@ class FlashAttentionTriton(torch.autograd.Function):
          is_causal: bool = False):
         
         batch_size = Q.shape[0]
-        Q_TILE_SIZE = 16
-        K_TILE_SIZE = 16
+        # Heuristics for Tile sizes to fit in 100KB Shared Memory (A4500/A40)
+        # FP32 needs 4 bytes/elem, BF16 needs 2 bytes/elem
+        D = Q.shape[-1]
+        element_size = Q.element_size()
+        
+        # Updated Heuristics for 100KB Shared Memory Limit
+        # O (Accumulator) is always FP32.
+        # D=256 FP32: 1 buffer = 16KB (if Tile=16). Need ~6 buffers -> 96KB. STRICT LIMIT.
+        if element_size == 4: # FP32 Input
+            if D > 128: # D=256
+                Q_TILE_SIZE = 16
+                K_TILE_SIZE = 16
+            elif D > 64: # D=128
+                Q_TILE_SIZE = 32
+                K_TILE_SIZE = 32
+            else: 
+                Q_TILE_SIZE = 64
+                K_TILE_SIZE = 32
+        else: # BF16 / FP16 Input
+            if D > 128: # D=256
+                # Q(32x256x2)=16KB, O(32x256x4)=32KB. K(32x256x2)=16KB.
+                # Q+O+2K+2V = 16+32+32+32 = 112KB (Unsafe).
+                # Try Q=32, K=16 ? Q=16KB, O=32KB, K=8KB. 
+                # 16+32+16+16 = 80KB (Safe).
+                Q_TILE_SIZE = 32
+                K_TILE_SIZE = 16
+            else: # D=128, 64...
+                Q_TILE_SIZE = 64
+                K_TILE_SIZE = 64
         T_q = (Q.shape[-2] + Q_TILE_SIZE - 1) // Q_TILE_SIZE
         T_kv = (K.shape[-2] + K_TILE_SIZE - 1) // K_TILE_SIZE
         O = torch.empty_like(Q)
