@@ -22,14 +22,29 @@ class ToyLanguageModel(nn.Module):
         logits = self.lm_head(x) # (B, T, V)
         return logits
 
-def naive_ddp_all_reduce(model, world_size):
+def naive_ddp_all_reduce(model, world_size, return_stats=False):
     """
     Naively performs all-reduce on individual parameter gradients.
+    
+    Args:
+        model: PyTorch model with gradients to reduce
+        world_size: Number of processes in the distributed group
+        return_stats: If True, return total bytes transferred
+    
+    Returns:
+        If return_stats=True: total_bytes (int)
+        If return_stats=False: None
     """
+    total_bytes = 0
     for param in model.parameters():
         if param.requires_grad and param.grad is not None:
             dist.all_reduce(param.grad, op=dist.ReduceOp.SUM)
             param.grad /= world_size
+            if return_stats:
+                total_bytes += param.grad.numel() * param.grad.element_size()
+    
+    if return_stats:
+        return total_bytes
 
 def run_training(rank, world_size):
     # Setup process group

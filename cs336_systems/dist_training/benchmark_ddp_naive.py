@@ -7,6 +7,8 @@ import torch.nn as nn
 import torch.optim as optim
 import logging
 
+from cs336_systems.dist_training.ddp_naive import naive_ddp_all_reduce
+
 try:
     from cs336_basics.model import BasicsTransformerLM
 except ImportError:
@@ -51,25 +53,7 @@ class Timer:
             self.end_t = time.time()
             return (self.end_t - self.start_t) * 1000 # ms
 
-def naive_ddp_all_reduce(model, world_size, timer=None):
-    """
-    Naively performs all-reduce on individual parameter gradients.
-    """
-    elapsed = 0.0
-    total_bytes = 0
-    for param in model.parameters():
-        if param.requires_grad and param.grad is not None:
-            if timer:
-                timer.start()
-            
-            dist.all_reduce(param.grad, op=dist.ReduceOp.SUM)
-            total_bytes += param.grad.numel() * param.grad.element_size()
-            
-            if timer:
-                elapsed += timer.stop()
-            
-            param.grad /= world_size
-    return elapsed, total_bytes
+
 
 def run_benchmark(rank, world_size):
     # 1. Setup Environment
@@ -171,7 +155,7 @@ def run_benchmark(rank, world_size):
         if not is_warmup:
             comm_timer.start()
             
-        _, step_bytes = naive_ddp_all_reduce(model, world_size, timer=None)
+        step_bytes = naive_ddp_all_reduce(model, world_size, return_stats=True)
         
         if not is_warmup:
             step_comm_ms = comm_timer.stop()
