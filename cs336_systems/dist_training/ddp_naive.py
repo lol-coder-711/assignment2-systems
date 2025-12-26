@@ -11,7 +11,7 @@ class ToyLanguageModel(nn.Module):
         super().__init__()
         self.embedding = nn.Embedding(vocab_size, embed_dim)
         # Using a single Transformer layer for simplicity and speed
-        encoder_layer = nn.TransformerEncoderLayer(d_model=embed_dim, nhead=nhead, batch_first=True, dropout=0.0) # need to set dropout to 0.0 to avoid nan
+        encoder_layer = nn.TransformerEncoderLayer(d_model=embed_dim, nhead=nhead, batch_first=True, dropout=0.0) # need to set dropout to 0.0 for deterministic results
         self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=1)
         self.lm_head = nn.Linear(embed_dim, vocab_size)
 
