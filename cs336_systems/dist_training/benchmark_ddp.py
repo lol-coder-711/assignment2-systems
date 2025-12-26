@@ -67,16 +67,18 @@ def run_benchmark(rank, world_size, flatten=False, overlap=False, results_queue=
         overlap: Whether to use DDP with async gradient hooks for overlap
         results_queue: Multiprocessing queue to store results
     """
-    # 1. Setup Environment
+
+        # 1. Setup Environment
     os.environ['MASTER_ADDR'] = 'localhost'
     os.environ['MASTER_PORT'] = '12356' # Use different port than naive test
     os.environ['PYTORCH_ENABLE_MPS_FALLBACK'] = '1'
     os.environ["GLOO_LOG_LEVEL"] = "ERROR"
     os.environ["TORCH_CPP_LOG_LEVEL"] = "ERROR"
-    os.environ["GLOG_minloglevel"] = "2" # Suppress Glog Warnings (0=INFO, 1=WARNING, 2=ERROR)
+    os.environ["GLOG_minloglevel"] = "2" # Suppress Glog Warnings
 
     if torch.cuda.is_available():
-        device = torch.device("cuda")
+        torch.cuda.set_device(rank)
+        device = torch.device(f"cuda:{rank}")
         backend = "nccl"
     elif torch.backends.mps.is_available():
         device = torch.device("mps")
@@ -124,8 +126,6 @@ def run_benchmark(rank, world_size, flatten=False, overlap=False, results_queue=
         logger.info(f"Model keys: {config.keys()}")
 
     # Initialize Model
-    # Note: BasicsTransformerLM expects explicit args, unpacking config
-    # For overlap mode, we'll wrap with DDP after initialization
     try:
         model = BasicsTransformerLM(**config).to(device)
         
@@ -176,7 +176,13 @@ def run_benchmark(rank, world_size, flatten=False, overlap=False, results_queue=
         if not is_warmup:
             backward_timer = Timer(device)
             backward_timer.start()
+        
+        if torch.cuda.is_available():
+            torch.cuda.nvtx.range_push("Backward")
         loss.backward()
+        if torch.cuda.is_available():
+            torch.cuda.nvtx.range_pop()
+
         if not is_warmup:
             backward_ms = backward_timer.stop()
             if rank == 0 and overlap:
@@ -187,7 +193,13 @@ def run_benchmark(rank, world_size, flatten=False, overlap=False, results_queue=
             # Overlap mode: hooks already triggered async all-reduce during backward
             if not is_warmup:
                 comm_timer.start()
+            
+            if torch.cuda.is_available():
+                torch.cuda.nvtx.range_push("Wait for Sync")
             model.finish_gradient_synchronization()
+            if torch.cuda.is_available():
+                torch.cuda.nvtx.range_pop()
+                
             if not is_warmup:
                 step_comm_ms = comm_timer.stop()
                 total_comm_time += step_comm_ms
@@ -201,8 +213,12 @@ def run_benchmark(rank, world_size, flatten=False, overlap=False, results_queue=
             # Naive/Flattened: blocking all-reduce
             if not is_warmup:
                 comm_timer.start()
-                
+            
+            if torch.cuda.is_available():
+                torch.cuda.nvtx.range_push("Communication")
             step_bytes = naive_ddp_all_reduce(model, world_size, return_stats=True, flatten=flatten)
+            if torch.cuda.is_available():
+                torch.cuda.nvtx.range_pop()
             
             if not is_warmup:
                 step_comm_ms = comm_timer.stop()
@@ -303,10 +319,9 @@ if __name__ == "__main__":
     os.environ['PYTORCH_ENABLE_MPS_FALLBACK'] = '1'
     
     # Test configurations
-    world_sizes = list(range(2, 11))  # 2, 3, 4, 5, 6, 7, 8, 9, 10
-    # Three methods: Naive (flatten=False, overlap=False), 
-    #                Flattened (flatten=True, overlap=False),
-    #                Overlap (flatten=False, overlap=True)
+    # Modified to run only the required 1 node 2 GPUs cases
+    world_sizes = [2] if torch.cuda.is_available() else [2, 4, 8]
+    # Two methods: Naive and Overlap
     test_configs = [
         {'flatten': False, 'overlap': False},  # Naive
         {'flatten': True, 'overlap': False},   # Flattened  
@@ -332,7 +347,8 @@ if __name__ == "__main__":
             print(f"{'='*60}\n")
             
             # Create a queue to collect results from rank 0
-            results_queue = mp.Queue()
+            ctx = mp.get_context('spawn')
+            results_queue = ctx.Queue()
             
             # Run benchmark
             mp.spawn(
