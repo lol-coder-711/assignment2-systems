@@ -109,14 +109,50 @@ def run_benchmark():
                 print(f"{seq_len:<8} {dim:<4} {row_data['dtype']:<8} | "
                       f"{row_data['Torch(Eager)_fwd']:<12.4f} {row_data['Torch(Compile)_fwd']:<14.4f} {row_data['FlashAttn_fwd']:<12.4f}")
 
-    # Save detailed CSV
+    # Save detailed CSV and Plot results
     import datetime
+    import os
+    import importlib.util
+
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = f"flash_attention_benchmark_results_{timestamp}.csv"
+    
+    # Get GPU Info for folder naming
+    if torch.cuda.is_available():
+        gpu_count = torch.cuda.device_count()
+        gpu_name = torch.cuda.get_device_name(0).replace(" ", "_").replace("/", "-")
+        gpu_info = f"{gpu_count}x{gpu_name}"
+    else:
+        gpu_info = "CPU"
+    
+    # Base directory: cs336_systems/flash_attention
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    
+    # New timestamped sub-directory with GPU info
+    output_dir = os.path.join(base_dir, f"benchmark_run_{gpu_info}_{timestamp}")
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+        
+    csv_filename = os.path.join(output_dir, "benchmark_results.csv")
+    
     df = pd.DataFrame(results)
-    df.to_csv(filename, index=False)
-    print(f"\nBenchmark complete. Results saved to {filename}")
+    df.to_csv(csv_filename, index=False)
+    print(f"\nBenchmark complete. Results saved to {csv_filename}")
     print(df)
+    
+    # Run plotting script
+    print("\nGenerating plots...")
+    try:
+        # Import plot_benchmark_results dynamically
+        plot_script_path = os.path.join(base_dir, "plot_benchmark_results.py")
+        spec = importlib.util.spec_from_file_location("plot_benchmark_results", plot_script_path)
+        plot_module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(plot_module)
+        
+        # Call the plot function
+        plot_module.plot_benchmark(csv_filename, output_dir)
+        print(f"Plots generated in {output_dir}")
+    except Exception as e:
+        print(f"Failed to generate plots: {e}")
 
 if __name__ == "__main__":
     run_benchmark()
