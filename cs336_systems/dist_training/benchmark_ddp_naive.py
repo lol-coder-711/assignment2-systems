@@ -55,7 +55,16 @@ class Timer:
 
 
 
-def run_benchmark(rank, world_size):
+def run_benchmark(rank, world_size, flatten=False, results_queue=None):
+    """
+    Run benchmark for DDP training.
+    
+    Args:
+        rank: Process rank
+        world_size: Number of processes
+        flatten: Whether to use flattened all-reduce
+        results_queue: Multiprocessing queue to store results
+    """
     # 1. Setup Environment
     os.environ['MASTER_ADDR'] = 'localhost'
     os.environ['MASTER_PORT'] = '12356' # Use different port than naive test
@@ -77,7 +86,8 @@ def run_benchmark(rank, world_size):
     dist.init_process_group(backend, rank=rank, world_size=world_size)
     
     if rank == 0:
-        logger.info(f"Running on {device} with backend {backend}")
+        method_name = "Flattened" if flatten else "Naive"
+        logger.info(f"Running on {device} with backend {backend}, Method: {method_name}")
 
     # 2. Model Configuration
     if device.type == "cuda":
@@ -155,7 +165,7 @@ def run_benchmark(rank, world_size):
         if not is_warmup:
             comm_timer.start()
             
-        step_bytes = naive_ddp_all_reduce(model, world_size, return_stats=True)
+        step_bytes = naive_ddp_all_reduce(model, world_size, return_stats=True, flatten=flatten)
         
         if not is_warmup:
             step_comm_ms = comm_timer.stop()
@@ -178,20 +188,91 @@ def run_benchmark(rank, world_size):
         comm_ratio = (avg_comm_time / avg_step_time) * 100 if avg_step_time > 0 else 0
         avg_step_bytes = step_bytes
         
-        print("\n" + "="*40)
-        print(f"Benchmark Results (Device: {device})")
-        print(f"Model Config: {config}")
-        print(f"World Size: {world_size}")
-        print(f"Average Step Time: {avg_step_time:.2f} ms")
-        print(f"Average Comm Time: {avg_comm_time:.2f} ms")
-        print(f"Average All-Reduce Data: {avg_step_bytes/1e6:.2f} MB")
-        print(f"Communication Overhead: {comm_ratio:.2f}%")
-        print("="*40 + "\n")
+        result = {
+            'world_size': world_size,
+            'flatten': flatten,
+            'device': str(device),
+            'avg_step_time': avg_step_time,
+            'avg_comm_time': avg_comm_time,
+            'avg_step_bytes': avg_step_bytes,
+            'comm_ratio': comm_ratio,
+        }
+        
+        if results_queue is not None:
+            results_queue.put(result)
 
     dist.destroy_process_group()
 
+def print_results_table(results):
+    """
+    Print benchmark results in a nicely formatted table.
+    """
+    print("\n" + "="*100)
+    print("DDP BENCHMARK RESULTS: Naive vs Flattened All-Reduce")
+    print("="*100)
+    
+    # Header
+    print(f"{'Method':<12} {'World Size':<12} {'Avg Step (ms)':<16} {'Avg Comm (ms)':<16} {'Data (MB)':<12} {'Comm %':<10}")
+    print("-" * 100)
+    
+    # Sort results by world_size then flatten
+    results = sorted(results, key=lambda x: (x['world_size'], x['flatten']))
+    
+    # Print rows
+    for r in results:
+        method = "Flattened" if r['flatten'] else "Naive"
+        print(f"{method:<12} {r['world_size']:<12} {r['avg_step_time']:<16.2f} {r['avg_comm_time']:<16.2f} "
+              f"{r['avg_step_bytes']/1e6:<12.2f} {r['comm_ratio']:<10.2f}")
+    
+    print("="*100 + "\n")
+    
+    # Print speedup analysis
+    print("SPEEDUP ANALYSIS (Flattened vs Naive):")
+    print("-" * 60)
+    world_sizes = sorted(set(r['world_size'] for r in results))
+    for ws in world_sizes:
+        naive = next((r for r in results if r['world_size'] == ws and not r['flatten']), None)
+        flattened = next((r for r in results if r['world_size'] == ws and r['flatten']), None)
+        
+        if naive and flattened:
+            step_speedup = naive['avg_step_time'] / flattened['avg_step_time']
+            comm_speedup = naive['avg_comm_time'] / flattened['avg_comm_time']
+            print(f"World Size {ws}: Step Speedup: {step_speedup:.2f}x, Comm Speedup: {comm_speedup:.2f}x")
+    print("-" * 60 + "\n")
+
+
 if __name__ == "__main__":
     os.environ['PYTORCH_ENABLE_MPS_FALLBACK'] = '1'
-    # Standard local test world size
-    world_size = 4
-    mp.spawn(run_benchmark, args=(world_size,), nprocs=world_size, join=True)
+    
+    # Test configurations: cartesian product of methods and world sizes
+    world_sizes = [2, 4, 8]
+    flatten_options = [False, True]  # Naive, Flattened
+    
+    all_results = []
+    
+    for world_size in world_sizes:
+        for flatten in flatten_options:
+            method_name = "Flattened" if flatten else "Naive"
+            print(f"\n{'='*60}")
+            print(f"Running: Method={method_name}, World Size={world_size}")
+            print(f"{'='*60}\n")
+            
+            # Create a queue to collect results from rank 0
+            results_queue = mp.Queue()
+            
+            # Run benchmark
+            mp.spawn(
+                run_benchmark,
+                args=(world_size, flatten, results_queue),
+                nprocs=world_size,
+                join=True
+            )
+            
+            # Collect result
+            if not results_queue.empty():
+                result = results_queue.get()
+                all_results.append(result)
+    
+    # Print final comparison table
+    if all_results:
+        print_results_table(all_results)

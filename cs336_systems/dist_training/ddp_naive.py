@@ -22,26 +22,56 @@ class ToyLanguageModel(nn.Module):
         logits = self.lm_head(x) # (B, T, V)
         return logits
 
-def naive_ddp_all_reduce(model, world_size, return_stats=False):
+def naive_ddp_all_reduce(model, world_size, return_stats=False, flatten=False):
     """
-    Naively performs all-reduce on individual parameter gradients.
+    Performs all-reduce on parameter gradients.
     
     Args:
         model: PyTorch model with gradients to reduce
         world_size: Number of processes in the distributed group
         return_stats: If True, return total bytes transferred
+        flatten: If True, flatten all gradients into single tensor before all-reduce.
+                 If False, all-reduce each parameter gradient individually (naive).
     
     Returns:
         If return_stats=True: total_bytes (int)
         If return_stats=False: None
     """
     total_bytes = 0
-    for param in model.parameters():
-        if param.requires_grad and param.grad is not None:
-            dist.all_reduce(param.grad, op=dist.ReduceOp.SUM)
-            param.grad /= world_size
-            if return_stats:
-                total_bytes += param.grad.numel() * param.grad.element_size()
+    
+    if flatten:
+        # Collect all gradients
+        grads = [p.grad for p in model.parameters() 
+                 if p.requires_grad and p.grad is not None]
+        
+        if len(grads) == 0:
+            return 0 if return_stats else None
+        
+        # Flatten into single tensor
+        flat_grads = torch._utils._flatten_dense_tensors(grads)
+        
+        # Single all-reduce call
+        dist.all_reduce(flat_grads, op=dist.ReduceOp.SUM)
+        flat_grads /= world_size
+        
+        # Unflatten back to original shapes
+        unflattened = torch._utils._unflatten_dense_tensors(flat_grads, grads)
+        
+        # In-place update each parameter's gradient
+        # Using copy_() to preserve gradient tensor references (important for optimizer)
+        for grad, new_grad in zip(grads, unflattened):
+            grad.copy_(new_grad)
+        
+        if return_stats:
+            total_bytes = flat_grads.numel() * flat_grads.element_size()
+    else:
+        # Original: all-reduce each parameter individually
+        for param in model.parameters():
+            if param.requires_grad and param.grad is not None:
+                dist.all_reduce(param.grad, op=dist.ReduceOp.SUM)
+                param.grad /= world_size
+                if return_stats:
+                    total_bytes += param.grad.numel() * param.grad.element_size()
     
     if return_stats:
         return total_bytes
