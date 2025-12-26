@@ -9,16 +9,29 @@ import torch.multiprocessing as mp
 from datetime import datetime, timedelta
 import platform
 
-def setup(rank, world_size, backend):
+def setup(rank, world_size, backend, device='cpu', device_id=None):
     os.environ["MASTER_ADDR"] = "localhost"
-    os.environ["MASTER_PORT"] = "29500"
+    os.environ["MASTER_PORT"] = os.environ.get("MASTER_PORT", "29500")
     
     # Suppress Gloo warning on Mac by binding to loopback if using Gloo
     if backend == "gloo" and platform.system() == "Darwin":
         os.environ["GLOO_SOCKET_IFNAME"] = "lo0"
 
-    # Initialize the process group
-    dist.init_process_group(backend, rank=rank, world_size=world_size, timeout=timedelta(minutes=5))
+    # For NCCL, we need to tell init_process_group which device to use
+    # This prevents the "devices unknown" warning and potential hangs
+    if backend == "nccl" and device == "cuda" and device_id is not None:
+        # Create a device object to pass to init_process_group
+        torch_device = torch.device(f"cuda:{device_id}")
+        dist.init_process_group(
+            backend,
+            rank=rank,
+            world_size=world_size,
+            timeout=timedelta(minutes=5),
+            device_id=torch_device  # This tells NCCL which GPU to use
+        )
+    else:
+        # Initialize the process group (for gloo or when device_id not provided)
+        dist.init_process_group(backend, rank=rank, world_size=world_size, timeout=timedelta(minutes=5))
 
 def cleanup():
     dist.destroy_process_group()
@@ -28,7 +41,17 @@ def benchmark_worker(rank, world_size, backend, device, data_sizes_mb, num_iters
     The worker function that runs in each process.
     """
     try:
-        setup(rank, world_size, backend)
+        # Set device_id for both CUDA and CPU (needed for tensor creation)
+        if device == 'cuda':
+            if torch.cuda.is_available():
+                device_id = rank % torch.cuda.device_count()
+                torch.cuda.set_device(device_id)
+            else:
+                raise RuntimeError("CUDA specified but not available.")
+        else:
+            device_id = None  # CPU doesn't use device_id
+
+        setup(rank, world_size, backend, device=device, device_id=device_id)
         
         results = []
         
@@ -36,20 +59,11 @@ def benchmark_worker(rank, world_size, backend, device, data_sizes_mb, num_iters
             # Calculate number of elements (assuming float32 = 4 bytes)
             num_elements = int(size_mb * 1024 * 1024 / 4)
             
+            # Create tensor on the appropriate device
             if device == 'cuda':
-                # Set device for this process (assuming 1 GPU per process for simplicity in this benchmark)
-                # For single-node multi-GPU, we typically map rank to device_id.
-                # However, for the provided Mac/CPU case, this branch won't execute.
-                # If running on a GPU node with fewer GPUs than ranks, this might oversubscribe,
-                # but standard practice is rank % num_gpus.
-                if torch.cuda.is_available():
-                    device_id = rank % torch.cuda.device_count()
-                    torch.cuda.set_device(device_id)
-                    tensor = torch.randn(num_elements, device=device_id)
-                else:
-                    raise RuntimeError("CUDA specified but not available.")
+                tensor = torch.randn(num_elements, device=device_id)
             else:
-                tensor = torch.randn(num_elements)
+                tensor = torch.randn(num_elements)  # CPU tensor
             
             # Warmup
             for _ in range(warmup_iters):
@@ -58,7 +72,10 @@ def benchmark_worker(rank, world_size, backend, device, data_sizes_mb, num_iters
             # Synchronize before timing (especially critical for CUDA)
             if device == 'cuda':
                 torch.cuda.synchronize()
-            dist.barrier() # Ensure all processes are ready to start
+            
+            
+            # Ensure all processes are ready before timing
+            dist.barrier()
             
             start_time = time.time()
             for _ in range(num_iters):
@@ -67,7 +84,10 @@ def benchmark_worker(rank, world_size, backend, device, data_sizes_mb, num_iters
             # Synchronize after timing
             if device == 'cuda':
                 torch.cuda.synchronize()
-            dist.barrier() # Ensure all processes are finished
+            
+            
+            # Ensure all processes finish before recording time
+            dist.barrier()
             
             end_time = time.time()
             

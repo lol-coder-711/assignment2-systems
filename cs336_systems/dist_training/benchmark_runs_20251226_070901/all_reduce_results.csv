@@ -1,0 +1,2 @@
+world_size,data_size_mb,latency_ms,backend,device
+2,1.0,1.443624496459961,nccl,cuda
