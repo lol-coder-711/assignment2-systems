@@ -37,10 +37,17 @@ for method in "${METHODS[@]}"; do
     
     if command -v nsys &> /dev/null && [[ $(uname) != "Darwin" ]]; then
         # NVIDIA GPU with nsys available
+        # Key fixes for mp.spawn corruption:
+        # 1. --wait=all: Wait for all child processes to finish before ending profiling
+        # 2. --sample=none: Disable sampling to reduce overhead/corruption risk
+        # 3. Keep --flush-on-cudaprofilerstop=false to avoid multi-context issues
+        # 4. Added dist.barrier() in Python code before cudaProfilerStop
         nsys profile \
             --trace-fork-before-exec=false \
             --flush-on-cudaprofilerstop=false \
             --capture-range=cudaProfilerApi \
+            --wait=all \
+            --sample=none \
             --trace=cuda,nvtx \
             --output="$OUTPUT_FILE" \
             --force-overwrite=true \
