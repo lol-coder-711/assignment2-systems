@@ -9,6 +9,7 @@ import logging
 
 from cs336_systems.dist_training.ddp_naive import naive_ddp_all_reduce
 from cs336_systems.dist_training.ddp_individual_parameters import DDP
+from cs336_systems.dist_training.ddp_overlap_bucketed import DDP as DDP_Bucketed
 
 try:
     from cs336_basics.model import BasicsTransformerLM
@@ -56,7 +57,7 @@ class Timer:
 
 
 
-def run_benchmark(rank, world_size, flatten=False, overlap=False, results_queue=None):
+def run_benchmark(rank, world_size, flatten=False, overlap=False, bucket_size_mb=None, results_queue=None):
     """
     Run benchmark for DDP training.
     
@@ -65,6 +66,7 @@ def run_benchmark(rank, world_size, flatten=False, overlap=False, results_queue=
         world_size: Number of processes
         flatten: Whether to use flattened all-reduce (ignored if overlap=True)
         overlap: Whether to use DDP with async gradient hooks for overlap
+        bucket_size_mb: If set, use bucketed DDP with this bucket size (in MB)
         results_queue: Multiprocessing queue to store results
     """
 
@@ -90,7 +92,9 @@ def run_benchmark(rank, world_size, flatten=False, overlap=False, results_queue=
     dist.init_process_group(backend, rank=rank, world_size=world_size)
     
     if rank == 0:
-        if overlap:
+        if bucket_size_mb is not None:
+            method_name = f"Bucketed ({bucket_size_mb}MB)"
+        elif overlap:
             method_name = "Overlap"
         elif flatten:
             method_name = "Flattened"
@@ -129,8 +133,10 @@ def run_benchmark(rank, world_size, flatten=False, overlap=False, results_queue=
     try:
         model = BasicsTransformerLM(**config).to(device)
         
-        # Wrap with DDP if overlap mode
-        if overlap:
+        # Wrap with DDP if overlap or bucketed mode
+        if bucket_size_mb is not None:
+            model = DDP_Bucketed(model, bucket_size_mb=bucket_size_mb)
+        elif overlap:
             model = DDP(model)
     except Exception as e:
         logger.error(f"Failed to init model: {e}")
@@ -196,8 +202,8 @@ def run_benchmark(rank, world_size, flatten=False, overlap=False, results_queue=
                 logger.info(f"  Backward: {backward_ms:.2f}ms")
 
         # Communication
-        if overlap:
-            # Overlap mode: hooks already triggered async all-reduce during backward
+        if bucket_size_mb is not None or overlap:
+            # Overlap/Bucketed mode: hooks already triggered async all-reduce during backward
             if not is_warmup:
                 comm_timer.start()
             
@@ -210,7 +216,7 @@ def run_benchmark(rank, world_size, flatten=False, overlap=False, results_queue=
             if not is_warmup:
                 step_comm_ms = comm_timer.stop()
                 total_comm_time += step_comm_ms
-            # For overlap, we can't easily measure bytes, use approximate
+            # For overlap/bucketed, we can't easily measure bytes, use approximate
             if step == num_warmup:
                 # Calculate bytes once (all params)
                 step_bytes = sum(p.grad.numel() * p.grad.element_size() 
@@ -341,10 +347,12 @@ if __name__ == "__main__":
     
     parser = argparse.ArgumentParser(description='DDP Benchmark')
     parser.add_argument('--method', type=str, required=True, 
-                        choices=['naive', 'flatten', 'overlap'],
+                        choices=['naive', 'flatten', 'overlap', 'bucketed'],
                         help='DDP method to benchmark')
     parser.add_argument('--world-size', type=int, default=2,
                         help='Number of processes (default: 2)')
+    parser.add_argument('--bucket-size-mb', type=float, default=25.0,
+                        help='Bucket size in MB for bucketed method (default: 25)')
     parser.add_argument('--enable-profiling', action='store_true',
                         help='Enable CUDA profiling (nvtx markers already in code)')
     
@@ -353,14 +361,17 @@ if __name__ == "__main__":
     os.environ['PYTORCH_ENABLE_MPS_FALLBACK'] = '1'
     
     # Map method string to config
-    if args.method == 'naive':
-        flatten, overlap = False, False
-    elif args.method == 'flatten':
-        flatten, overlap = True, False
-    elif args.method == 'overlap':
-        flatten, overlap = False, True
+    flatten, overlap, bucket_size_mb = False, False, None
+    method_name = args.method.capitalize()
     
-    method_name = args.method.capitalize() if args.method != 'flatten' else 'Flattened'
+    if args.method == 'flatten':
+        flatten = True
+        method_name = "Flattened"
+    elif args.method == 'overlap':
+        overlap = True
+    elif args.method == 'bucketed':
+        bucket_size_mb = args.bucket_size_mb
+        method_name = f"Bucketed ({bucket_size_mb}MB)"
     
     print(f"\n{'='*60}")
     print(f"Running: Method={method_name}, World Size={args.world_size}")
@@ -373,7 +384,7 @@ if __name__ == "__main__":
     # Run benchmark
     mp.spawn(
         run_benchmark,
-        args=(args.world_size, flatten, overlap, results_queue),
+        args=(args.world_size, flatten, overlap, bucket_size_mb, results_queue),
         nprocs=args.world_size,
         join=True
     )

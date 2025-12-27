@@ -2,10 +2,9 @@
 # Script to run DDP benchmarks with nsys profiling
 # Usage: ./run_benchmark_with_nsys.sh
 
-# Note: Removed 'set -e' to allow script to continue even if one method fails
-
 # Configuration
-METHODS=("naive" "flatten" "overlap")
+# Format: "method" or "bucketed:size_mb"
+METHODS=("naive" "flatten" "overlap" "bucketed:1" "bucketed:10" "bucketed:100" "bucketed:1000")
 WORLD_SIZE=2
 OUTPUT_DIR="./nsys_profiles"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
@@ -13,35 +12,33 @@ TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 # Create output directory
 mkdir -p "$OUTPUT_DIR"
 
-echo "Starting DDP benchmarking with nsys profiling..."
+echo "Starting DDP benchmarking..."
 echo "Timestamp: $TIMESTAMP"
-echo "Output directory: $OUTPUT_DIR"
 echo "Methods: ${METHODS[@]}"
 echo "World size: $WORLD_SIZE"
 echo ""
 
 for method in "${METHODS[@]}"; do
+    # Parse method:bucket_size format
+    if [[ "$method" == bucketed:* ]]; then
+        BUCKET_SIZE="${method#bucketed:}"
+        METHOD_NAME="bucketed"
+        DISPLAY_NAME="Bucketed ${BUCKET_SIZE}MB"
+        OUTPUT_FILE="${OUTPUT_DIR}/ddp_bucketed_${BUCKET_SIZE}mb_ws${WORLD_SIZE}_${TIMESTAMP}.nsys-rep"
+        EXTRA_ARGS="--bucket-size-mb $BUCKET_SIZE"
+    else
+        METHOD_NAME="$method"
+        DISPLAY_NAME="$method"
+        OUTPUT_FILE="${OUTPUT_DIR}/ddp_${method}_ws${WORLD_SIZE}_${TIMESTAMP}.nsys-rep"
+        EXTRA_ARGS=""
+    fi
+    
     echo "========================================"
-    echo "Running: $method (World Size: $WORLD_SIZE)"
+    echo "Running: $DISPLAY_NAME (World Size: $WORLD_SIZE)"
     echo "========================================"
     
-    # Generate output filename with timestamp
-    OUTPUT_FILE="${OUTPUT_DIR}/ddp_${method}_ws${WORLD_SIZE}_${TIMESTAMP}.nsys-rep"
-    
-    # Run with nsys profiling
-    # Key options explained:
-    # --trace-fork-before-exec=false: Don't trace child processes created by spawn
-    # --flush-on-cudaprofilerstop=false: Prevent corruption in multi-context scenarios
-    # --capture-range=cudaProfilerApi: Only profile between cudaProfilerStart/Stop
-    # --trace=cuda,nvtx: Capture CUDA and NVTX events
-    
-    if command -v nsys &> /dev/null && [[ $(uname) != "Darwin" ]]; then
-        # NVIDIA GPU with nsys available
-        # Key fixes for mp.spawn corruption:
-        # 1. --wait=all: Wait for all child processes to finish before ending profiling
-        # 2. --sample=none: Disable sampling to reduce overhead/corruption risk
-        # 3. Keep --flush-on-cudaprofilerstop=false to avoid multi-context issues
-        # 4. Added dist.barrier() in Python code before cudaProfilerStop
+    if command -v nsys &> /dev/null && command -v nvidia-smi &> /dev/null; then
+        # CUDA environment with nsys available
         nsys profile \
             --trace-fork-before-exec=false \
             --flush-on-cudaprofilerstop=false \
@@ -52,33 +49,23 @@ for method in "${METHODS[@]}"; do
             --output="$OUTPUT_FILE" \
             --force-overwrite=true \
             python cs336_systems/dist_training/benchmark_ddp.py \
-                --method "$method" \
+                --method "$METHOD_NAME" \
+                $EXTRA_ARGS \
                 --world-size "$WORLD_SIZE" \
-                --enable-profiling || true  # Continue even if nsys returns non-zero exit code
+                --enable-profiling || true
         
-        # Sync and wait to ensure file is complete
         sync
-        sleep 3
+        sleep 2
         
-        # Verify the output file
         if [ -f "${OUTPUT_FILE}" ]; then
             FILE_SIZE=$(stat -f%z "${OUTPUT_FILE}" 2>/dev/null || stat -c%s "${OUTPUT_FILE}" 2>/dev/null)
             echo "✓ Profile saved: ${OUTPUT_FILE} (${FILE_SIZE} bytes)"
-            
-            # Generate MD5 checksum for verification
-            if command -v md5sum &> /dev/null; then
-                md5sum "${OUTPUT_FILE}" > "${OUTPUT_FILE}.md5"
-            elif command -v md5 &> /dev/null; then
-                md5 "${OUTPUT_FILE}" > "${OUTPUT_FILE}.md5"
-            fi
-        else
-            echo "✗ Warning: Profile file not found: ${OUTPUT_FILE}"
         fi
     else
-        # CPU/MPS or nsys not available - run without profiling
-        echo "nsys not available or not on Linux, running without profiling..."
+        # CPU/MPS - run without profiling
         python cs336_systems/dist_training/benchmark_ddp.py \
-            --method "$method" \
+            --method "$METHOD_NAME" \
+            $EXTRA_ARGS \
             --world-size "$WORLD_SIZE"
     fi
     
@@ -87,11 +74,9 @@ done
 
 echo "========================================"
 echo "All benchmarks completed!"
-echo "Profiles saved in: $OUTPUT_DIR"
 echo "Timestamp: $TIMESTAMP"
 echo "========================================"
 
-# List all generated profiles
 if [ -d "$OUTPUT_DIR" ]; then
     echo ""
     echo "Generated profiles:"
