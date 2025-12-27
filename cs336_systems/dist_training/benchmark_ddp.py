@@ -176,6 +176,7 @@ def run_benchmark(rank, world_size, flatten=False, overlap=False, bucket_size_mb
             torch.cuda.cudart().cudaProfilerStart()
             if rank == 0:
                 logger.info("========== CUDA Profiler Started ==========")
+                logger.info(f"Method: flatten={flatten}, overlap={overlap}, bucket_size_mb={bucket_size_mb}")
         
         # Start Step Timing
         if not is_warmup:
@@ -256,6 +257,8 @@ def run_benchmark(rank, world_size, flatten=False, overlap=False, bucket_size_mb
     dist.barrier()
     
     if torch.cuda.is_available():
+        if rank == 0:
+            logger.info("Stopping CUDA profiler...")
         torch.cuda.synchronize()  # Extra sync after barrier
         torch.cuda.cudart().cudaProfilerStop()
         if rank == 0:

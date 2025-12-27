@@ -60,6 +60,12 @@ for method in "${METHODS[@]}"; do
         if [ -f "${OUTPUT_FILE}" ]; then
             FILE_SIZE=$(stat -f%z "${OUTPUT_FILE}" 2>/dev/null || stat -c%s "${OUTPUT_FILE}" 2>/dev/null)
             echo "✓ Profile saved: ${OUTPUT_FILE} (${FILE_SIZE} bytes)"
+        else
+            echo "✗ WARNING: Profile file not created: ${OUTPUT_FILE}"
+            echo "  This could mean:"
+            echo "  - The profiler didn't capture any data (check if CUDA profiler was started)"
+            echo "  - The process exited early or encountered an error"
+            echo "  - The capture range didn't include any profiled code"
         fi
     else
         # CPU/MPS - run without profiling
