@@ -2,7 +2,7 @@
 # Script to run DDP benchmarks with nsys profiling
 # Usage: ./run_benchmark_with_nsys.sh
 
-set -e
+# Note: Removed 'set -e' to allow script to continue even if one method fails
 
 # Configuration
 METHODS=("naive" "flatten" "overlap")
@@ -54,7 +54,7 @@ for method in "${METHODS[@]}"; do
             python cs336_systems/dist_training/benchmark_ddp.py \
                 --method "$method" \
                 --world-size "$WORLD_SIZE" \
-                --enable-profiling
+                --enable-profiling || true  # Continue even if nsys returns non-zero exit code
         
         # Sync and wait to ensure file is complete
         sync
