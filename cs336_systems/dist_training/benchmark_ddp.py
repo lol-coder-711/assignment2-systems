@@ -164,6 +164,13 @@ def run_benchmark(rank, world_size, flatten=False, overlap=False, results_queue=
     for step in range(num_warmup + num_steps):
         is_warmup = step < num_warmup
         
+        # Start profiling after warmup
+        if step == num_warmup and torch.cuda.is_available():
+            torch.cuda.synchronize()  # Ensure warmup is complete
+            torch.cuda.cudart().cudaProfilerStart()
+            if rank == 0:
+                logger.info("========== CUDA Profiler Started ==========")
+        
         # Start Step Timing
         if not is_warmup:
             step_timer.start()
@@ -233,6 +240,13 @@ def run_benchmark(rank, world_size, flatten=False, overlap=False, results_queue=
             
             if rank == 0:
                 logger.info(f"Step {step}: Total={step_total_ms:.2f}ms, Comm={step_comm_ms:.2f}ms, Data={step_bytes/1e6:.2f}MB")
+    
+    # Stop profiling after all steps
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()  # Ensure all work is complete
+        torch.cuda.cudart().cudaProfilerStop()
+        if rank == 0:
+            logger.info("========== CUDA Profiler Stopped ==========")
 
     # 5. Reporting
     if rank == 0:
@@ -316,53 +330,54 @@ def print_results_table(results):
 
 
 if __name__ == "__main__":
+    import argparse
+    
+    parser = argparse.ArgumentParser(description='DDP Benchmark')
+    parser.add_argument('--method', type=str, required=True, 
+                        choices=['naive', 'flatten', 'overlap'],
+                        help='DDP method to benchmark')
+    parser.add_argument('--world-size', type=int, default=2,
+                        help='Number of processes (default: 2)')
+    parser.add_argument('--enable-profiling', action='store_true',
+                        help='Enable CUDA profiling (nvtx markers already in code)')
+    
+    args = parser.parse_args()
+    
     os.environ['PYTORCH_ENABLE_MPS_FALLBACK'] = '1'
     
-    # Test configurations
-    # Modified to run only the required 1 node 2 GPUs cases
-    world_sizes = [2] if torch.cuda.is_available() else [2, 4, 8]
-    # Two methods: Naive and Overlap
-    test_configs = [
-        {'flatten': False, 'overlap': False},  # Naive
-        {'flatten': True, 'overlap': False},   # Flattened  
-        {'flatten': False, 'overlap': True},   # Overlap
-    ]
+    # Map method string to config
+    if args.method == 'naive':
+        flatten, overlap = False, False
+    elif args.method == 'flatten':
+        flatten, overlap = True, False
+    elif args.method == 'overlap':
+        flatten, overlap = False, True
     
-    all_results = []
+    method_name = args.method.capitalize() if args.method != 'flatten' else 'Flattened'
     
-    for world_size in world_sizes:
-        for config in test_configs:
-            flatten = config['flatten']
-            overlap = config['overlap']
-            
-            if overlap:
-                method_name = "Overlap"
-            elif flatten:
-                method_name = "Flattened"
-            else:
-                method_name = "Naive"
-                
-            print(f"\n{'='*60}")
-            print(f"Running: Method={method_name}, World Size={world_size}")
-            print(f"{'='*60}\n")
-            
-            # Create a queue to collect results from rank 0
-            ctx = mp.get_context('spawn')
-            results_queue = ctx.Queue()
-            
-            # Run benchmark
-            mp.spawn(
-                run_benchmark,
-                args=(world_size, flatten, overlap, results_queue),
-                nprocs=world_size,
-                join=True
-            )
-            
-            # Collect result
-            if not results_queue.empty():
-                result = results_queue.get()
-                all_results.append(result)
+    print(f"\n{'='*60}")
+    print(f"Running: Method={method_name}, World Size={args.world_size}")
+    print(f"{'='*60}\n")
     
-    # Print final comparison table
-    if all_results:
-        print_results_table(all_results)
+    # Create a queue to collect results from rank 0
+    ctx = mp.get_context('spawn')
+    results_queue = ctx.Queue()
+    
+    # Run benchmark
+    mp.spawn(
+        run_benchmark,
+        args=(args.world_size, flatten, overlap, results_queue),
+        nprocs=args.world_size,
+        join=True
+    )
+    
+    # Print result
+    if not results_queue.empty():
+        result = results_queue.get()
+        print(f"\n{'='*60}")
+        print(f"RESULT: {method_name} WS={result['world_size']}")
+        print(f"  Avg Step Time: {result['avg_step_time']:.2f}ms")
+        print(f"  Avg Comm Time: {result['avg_comm_time']:.2f}ms") 
+        print(f"  Comm Ratio: {result['comm_ratio']:.2f}%")
+        print(f"  Data Size: {result['avg_step_bytes']/1e6:.2f}MB")
+        print(f"{'='*60}\n")
