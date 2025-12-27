@@ -2,7 +2,7 @@
 # Script to run DDP benchmarks with nsys profiling
 # Usage: ./run_benchmark_with_nsys.sh
 
-set -e
+# Note: Removed 'set -e' to allow script to continue even if one method fails
 
 # Configuration
 METHODS=("naive" "flatten" "overlap")
@@ -37,17 +37,24 @@ for method in "${METHODS[@]}"; do
     
     if command -v nsys &> /dev/null && [[ $(uname) != "Darwin" ]]; then
         # NVIDIA GPU with nsys available
+        # Key fixes for mp.spawn corruption:
+        # 1. --wait=all: Wait for all child processes to finish before ending profiling
+        # 2. --sample=none: Disable sampling to reduce overhead/corruption risk
+        # 3. Keep --flush-on-cudaprofilerstop=false to avoid multi-context issues
+        # 4. Added dist.barrier() in Python code before cudaProfilerStop
         nsys profile \
             --trace-fork-before-exec=false \
             --flush-on-cudaprofilerstop=false \
             --capture-range=cudaProfilerApi \
+            --wait=all \
+            --sample=none \
             --trace=cuda,nvtx \
             --output="$OUTPUT_FILE" \
             --force-overwrite=true \
             python cs336_systems/dist_training/benchmark_ddp.py \
                 --method "$method" \
                 --world-size "$WORLD_SIZE" \
-                --enable-profiling
+                --enable-profiling || true  # Continue even if nsys returns non-zero exit code
         
         # Sync and wait to ensure file is complete
         sync

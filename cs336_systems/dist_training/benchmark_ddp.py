@@ -150,7 +150,7 @@ def run_benchmark(rank, world_size, flatten=False, overlap=False, results_queue=
 
     # 4. Benchmarking Loop
     num_warmup = 5
-    num_steps = 10
+    num_steps = 3
     
     step_timer = Timer(device)
     comm_timer = Timer(device)
@@ -242,8 +242,15 @@ def run_benchmark(rank, world_size, flatten=False, overlap=False, results_queue=
                 logger.info(f"Step {step}: Total={step_total_ms:.2f}ms, Comm={step_comm_ms:.2f}ms, Data={step_bytes/1e6:.2f}MB")
     
     # Stop profiling after all steps
+    # Critical: sync everything before stopping profiler to prevent corruption
     if torch.cuda.is_available():
-        torch.cuda.synchronize()  # Ensure all work is complete
+        torch.cuda.synchronize()  # Ensure all CUDA work is complete
+    
+    # Ensure all ranks finish before stopping profiler (prevents NCCL hangs)
+    dist.barrier()
+    
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()  # Extra sync after barrier
         torch.cuda.cudart().cudaProfilerStop()
         if rank == 0:
             logger.info("========== CUDA Profiler Stopped ==========")
